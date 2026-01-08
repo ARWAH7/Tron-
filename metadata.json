@@ -1,0 +1,5 @@
+{
+  "name": "哈希单双走势",
+  "description": "A comprehensive blockchain data visualization dashboard featuring a trend roadmap and block history table with interval-based sampling.",
+  "requestFramePermissions": []
+}
