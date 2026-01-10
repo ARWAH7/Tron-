@@ -1,11 +1,11 @@
 
-import { BlockData, BlockType, GridCell } from '../types';
+import { BlockData, BlockType, SizeType, GridCell } from '../types';
 
 const TRON_GRID_BASE = "https://api.trongrid.io";
 
-/**
- * Derives a result value (0-9) from the hash.
- */
+// Persistent memory cache for blocks to avoid re-fetching same data
+const memoryCache = new Map<number, BlockData>();
+
 export const deriveResultFromHash = (hash: string): number => {
   if (!hash) return 0;
   const digits = hash.match(/\d/g);
@@ -15,66 +15,73 @@ export const deriveResultFromHash = (hash: string): number => {
   return 0;
 };
 
-/**
- * Formats a raw timestamp (ms) to YYYY-MM-DD HH:mm:ss
- */
 export const formatTimestamp = (ts: number): string => {
   const date = new Date(ts);
   const pad = (n: number) => n.toString().padStart(2, '0');
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 };
 
-/**
- * Fetches the latest block from TronGrid
- */
-export const fetchLatestBlock = async (apiKey: string) => {
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+export const fetchWithRetry = async (url: string, options: any, retries = 3, backoff = 500): Promise<any> => {
   try {
-    const response = await fetch(`${TRON_GRID_BASE}/wallet/getnowblock`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json; charset=utf-8',
-        'TRON-PRO-API-KEY': apiKey
-      },
-      body: '{}'
-    });
+    const response = await fetch(url, options);
+    
+    if (response.status === 429) {
+      if (retries > 0) {
+        await wait(backoff);
+        return fetchWithRetry(url, options, retries - 1, backoff * 2);
+      }
+      throw new Error("Rate limit exceeded (429). Please try again later.");
+    }
+
     if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+    
     const data = await response.json();
     if (data.Error) throw new Error(data.Error);
     return data;
   } catch (error) {
-    console.error("fetchLatestBlock error:", error);
+    if (retries > 0) {
+      await wait(backoff);
+      return fetchWithRetry(url, options, retries - 1, backoff * 2);
+    }
     throw error;
   }
 };
 
-/**
- * Fetches a specific block by number
- */
+export const fetchLatestBlock = async (apiKey: string) => {
+  return fetchWithRetry(`${TRON_GRID_BASE}/wallet/getnowblock`, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json; charset=utf-8',
+      'TRON-PRO-API-KEY': apiKey
+    },
+    body: '{}'
+  });
+};
+
 export const fetchBlockByNum = async (num: number, apiKey: string) => {
-  try {
-    const response = await fetch(`${TRON_GRID_BASE}/wallet/getblockbynum`, {
-      method: 'POST',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json; charset=utf-8',
-        'TRON-PRO-API-KEY': apiKey
-      },
-      body: JSON.stringify({ num })
-    });
-    if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-    const data = await response.json();
-    if (!data.blockID) throw new Error(`Block ${num} not found or invalid`);
-    return data;
-  } catch (error) {
-    console.error(`fetchBlockByNum(${num}) error:`, error);
-    throw error;
-  }
+  // Return from cache if available
+  if (memoryCache.has(num)) return memoryCache.get(num);
+
+  const data = await fetchWithRetry(`${TRON_GRID_BASE}/wallet/getblockbynum`, {
+    method: 'POST',
+    headers: {
+      'Accept': 'application/json',
+      'Content-Type': 'application/json; charset=utf-8',
+      'TRON-PRO-API-KEY': apiKey
+    },
+    body: JSON.stringify({ num })
+  });
+
+  if (!data.blockID) throw new Error(`Block ${num} not found`);
+  
+  const block = transformTronBlock(data);
+  memoryCache.set(num, block);
+  return block;
 };
 
-/**
- * Transforms TronGrid response to internal BlockData
- */
 export const transformTronBlock = (raw: any): BlockData => {
   const hash = raw.blockID;
   const height = raw.block_header.raw_data.number;
@@ -86,28 +93,31 @@ export const transformTronBlock = (raw: any): BlockData => {
     hash,
     resultValue,
     type: resultValue % 2 === 0 ? 'EVEN' : 'ODD',
+    sizeType: resultValue >= 5 ? 'BIG' : 'SMALL',
     timestamp: formatTimestamp(timestampRaw)
   };
 };
 
-/**
- * Check if a height is aligned with the requested interval
- */
 export const isAligned = (height: number, interval: number): boolean => {
   if (interval === 1) return true;
   return height % interval === 0;
 };
 
-export const calculateTrendGrid = (blocks: BlockData[], rows: number = 10): GridCell[][] => {
+export const calculateTrendGrid = (
+  blocks: BlockData[], 
+  typeKey: 'type' | 'sizeType',
+  rows: number = 10
+): GridCell[][] => {
   if (blocks.length === 0) return [];
   
   const chronological = [...blocks].sort((a, b) => a.height - b.height);
   const columns: GridCell[][] = [];
   let currentColumn: GridCell[] = [];
-  let lastType: BlockType | null = null;
+  let lastVal: string | null = null;
 
   chronological.forEach((block) => {
-    if (block.type !== lastType || currentColumn.length >= rows) {
+    const currentVal = block[typeKey];
+    if (currentVal !== lastVal || currentColumn.length >= rows) {
       if (currentColumn.length > 0) {
         while (currentColumn.length < rows) {
           currentColumn.push({ type: null });
@@ -115,9 +125,9 @@ export const calculateTrendGrid = (blocks: BlockData[], rows: number = 10): Grid
         columns.push(currentColumn);
       }
       currentColumn = [];
-      lastType = block.type;
+      lastVal = currentVal;
     }
-    currentColumn.push({ type: block.type, value: block.resultValue });
+    currentColumn.push({ type: currentVal as any, value: block.resultValue });
   });
 
   if (currentColumn.length > 0) {

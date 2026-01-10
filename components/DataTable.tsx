@@ -1,60 +1,78 @@
 
-import React from 'react';
+import React, { memo } from 'react';
 import { BlockData } from '../types';
 
 interface DataTableProps {
   blocks: BlockData[];
 }
 
-const DataTable: React.FC<DataTableProps> = ({ blocks }) => {
+const DataRow = memo(({ block, isEven }: { block: BlockData; isEven: boolean }) => {
+  // Pre-split timestamp to avoid doing it every render
+  const timeParts = block.timestamp.split(' ');
+
   return (
-    <div className="bg-white rounded-xl shadow-md overflow-hidden border border-gray-200">
-      <table className="w-full text-left border-collapse table-fixed">
-        <thead className="bg-[#7888a5] text-white text-xs md:text-sm font-bold">
-          <tr>
-            <th className="py-4 px-3 md:px-6 w-[20%]">区块高度</th>
-            <th className="py-4 px-3 md:px-6 w-[45%]">区块hash</th>
-            <th className="py-4 px-3 md:px-6 w-[15%]">区块结果</th>
-            <th className="py-4 px-3 md:px-6 w-[20%]">时间</th>
-          </tr>
-        </thead>
-        <tbody className="text-xs md:text-sm">
-          {blocks.map((block, idx) => (
-            <tr 
-              key={block.height} 
-              className={`${idx % 2 === 0 ? 'bg-white' : 'bg-[#f8faff]'} hover:bg-blue-50 transition-colors border-b border-gray-50 last:border-0`}
-            >
-              <td className="py-4 px-3 md:px-6 text-blue-600 font-bold tabular-nums">
-                {block.height}
-              </td>
-              <td className="py-4 px-3 md:px-6 text-gray-400 font-mono truncate text-[10px] md:text-xs">
-                {block.hash}
-              </td>
-              <td className="py-4 px-3 md:px-6">
-                <div className="flex items-center space-x-2">
-                  <span className={`font-bold ${block.type === 'ODD' ? 'text-red-500' : 'text-teal-500'}`}>
-                    {block.resultValue}
-                  </span>
-                  <span className="text-gray-300">|</span>
-                  <span className={`px-2 py-0.5 rounded text-[10px] text-white font-bold ${block.type === 'ODD' ? 'bg-red-400' : 'bg-teal-400'}`}>
-                    {block.type === 'ODD' ? '单' : '双'}
-                  </span>
-                </div>
-              </td>
-              <td className="py-4 px-3 md:px-6 text-gray-500 tabular-nums leading-tight whitespace-pre-wrap">
-                {block.timestamp.split(' ').join('\n')}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-      {blocks.length === 0 && (
-        <div className="py-20 text-center text-gray-400 font-medium">
-          暂无区块数据
+    <tr className={`${isEven ? 'bg-white' : 'bg-[#f8faff]'} hover:bg-blue-50/50 transition-colors border-b border-gray-50 last:border-0`}>
+      <td className="py-5 px-6 text-blue-600 font-black tabular-nums">
+        {block.height}
+      </td>
+      <td className="py-5 px-6 text-gray-400 font-mono truncate text-[10px] md:text-xs">
+        {block.hash}
+      </td>
+      <td className="py-5 px-6">
+        <div className="flex items-center space-x-2">
+          <span className="font-black text-gray-700 bg-gray-100 px-2 py-1 rounded-md min-w-[1.5rem] text-center">
+            {block.resultValue}
+          </span>
+          <span className="text-gray-200">|</span>
+          <span className={`px-2 py-1 rounded-md text-[10px] text-white font-black ${block.type === 'ODD' ? 'bg-red-500' : 'bg-teal-500'}`}>
+            {block.type === 'ODD' ? '单' : '双'}
+          </span>
+          <span className={`px-2 py-1 rounded-md text-[10px] text-white font-black ${block.sizeType === 'BIG' ? 'bg-orange-500' : 'bg-indigo-500'}`}>
+            {block.sizeType === 'BIG' ? '大' : '小'}
+          </span>
         </div>
-      )}
+      </td>
+      <td className="py-5 px-6 text-gray-500 tabular-nums leading-snug whitespace-pre-wrap font-medium">
+        {timeParts[0]}<br/>{timeParts[1]}
+      </td>
+    </tr>
+  );
+});
+
+DataRow.displayName = 'DataRow';
+
+const DataTable: React.FC<DataTableProps> = memo(({ blocks }) => {
+  if (blocks.length === 0) {
+    return (
+      <div className="bg-white rounded-3xl shadow-xl border border-gray-100 py-24 text-center">
+        <p className="text-gray-400 font-black uppercase tracking-widest text-xs">暂无区块数据</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-3xl shadow-xl overflow-hidden border border-gray-100">
+      <div className="overflow-x-auto">
+        <table className="w-full text-left border-collapse table-fixed min-w-[700px]">
+          <thead className="bg-[#7888a5] text-white text-xs md:text-sm font-black uppercase tracking-wider sticky top-0 z-10">
+            <tr>
+              <th className="py-5 px-6 w-[20%]">区块高度</th>
+              <th className="py-5 px-6 w-[35%]">区块 Hash</th>
+              <th className="py-5 px-6 w-[25%]">结果分析</th>
+              <th className="py-5 px-6 w-[20%]">出块时间</th>
+            </tr>
+          </thead>
+          <tbody className="text-xs md:text-sm">
+            {blocks.map((block, idx) => (
+              <DataRow key={block.height} block={block} isEven={idx % 2 === 0} />
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
-};
+});
+
+DataTable.displayName = 'DataTable';
 
 export default DataTable;
