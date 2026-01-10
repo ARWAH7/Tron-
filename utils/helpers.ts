@@ -62,7 +62,6 @@ export const fetchLatestBlock = async (apiKey: string) => {
 };
 
 export const fetchBlockByNum = async (num: number, apiKey: string) => {
-  // Return from cache if available
   if (memoryCache.has(num)) return memoryCache.get(num);
 
   const data = await fetchWithRetry(`${TRON_GRID_BASE}/wallet/getblockbynum`, {
@@ -103,12 +102,16 @@ export const isAligned = (height: number, interval: number): boolean => {
   return height % interval === 0;
 };
 
+/**
+ * Big Road Calculation:
+ * New column when result changes.
+ */
 export const calculateTrendGrid = (
   blocks: BlockData[], 
   typeKey: 'type' | 'sizeType',
-  rows: number = 10
+  rows: number = 6
 ): GridCell[][] => {
-  if (blocks.length === 0) return [];
+  if (blocks.length === 0) return Array(24).fill(Array(rows).fill({ type: null }));
   
   const chronological = [...blocks].sort((a, b) => a.height - b.height);
   const columns: GridCell[][] = [];
@@ -137,10 +140,42 @@ export const calculateTrendGrid = (
     columns.push(currentColumn);
   }
 
-  const minCols = 50;
+  const minCols = 24;
   while (columns.length < minCols) {
     columns.push(Array(rows).fill({ type: null }));
   }
 
+  return columns;
+};
+
+/**
+ * Bead Road Calculation:
+ * Sequential filling: top-to-bottom, column-by-column.
+ */
+export const calculateBeadGrid = (
+  blocks: BlockData[],
+  typeKey: 'type' | 'sizeType',
+  rows: number = 6
+): GridCell[][] => {
+  const minCols = 24;
+  const chronological = [...blocks].sort((a, b) => a.height - b.height);
+  const totalItems = chronological.length;
+  const numCols = Math.max(minCols, Math.ceil(totalItems / rows));
+  
+  const columns: GridCell[][] = [];
+  for (let c = 0; c < numCols; c++) {
+    const column: GridCell[] = [];
+    for (let r = 0; r < rows; r++) {
+      const index = c * rows + r;
+      if (index < totalItems) {
+        const block = chronological[index];
+        column.push({ type: block[typeKey] as any, value: block.resultValue });
+      } else {
+        column.push({ type: null });
+      }
+    }
+    columns.push(column);
+  }
+  
   return columns;
 };
