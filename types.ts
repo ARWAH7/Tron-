@@ -16,7 +16,8 @@ export interface IntervalRule {
   label: string;
   value: number;
   startBlock: number; // 0 implies alignment to absolute height
-  gridRows: number; // The height (N) of the grid (default 6)
+  trendRows: number;  // Grid rows for Trend (Big Road) charts
+  beadRows: number;   // Grid rows for Bead Road charts
 }
 
 export type IntervalType = number;

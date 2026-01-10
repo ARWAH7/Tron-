@@ -86,9 +86,9 @@ const BeadRoad: React.FC<BeadRoadProps> = memo(({ blocks, mode, title, rows = 6 
 
       <div 
         ref={containerRef}
-        className="overflow-x-auto custom-scrollbar rounded-lg border border-gray-100 bg-gray-50/20 flex-1"
+        className="overflow-auto custom-scrollbar rounded-lg border border-gray-100 bg-gray-50/20 flex-1 min-h-0"
       >
-        <div className="flex min-h-full">
+        <div className="flex min-h-full w-max">
           {grid.map((column, colIdx) => (
             <div key={colIdx} className="flex flex-col">
               {column.map((cell, rowIdx) => renderCell(cell.type, cell.value, colIdx, rowIdx))}
