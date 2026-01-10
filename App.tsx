@@ -13,23 +13,34 @@ const App: React.FC = () => {
   const [showSettings, setShowSettings] = useState(() => !localStorage.getItem('tron_api_key'));
   const [activeInterval, setActiveInterval] = useState<IntervalType>(1);
   const [activeView, setActiveView] = useState<ViewType>('parity');
-  const [blocks, setBlocks] = useState<BlockData[]>([]);
+  
+  // 主数据集：存储所有已获取的区块。不再随间隔切换而清空。
+  const [allBlocks, setAllBlocks] = useState<BlockData[]>([]);
+  
   const [searchQuery, setSearchQuery] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   const blocksRef = useRef<BlockData[]>([]);
-  const intervalRef = useRef<IntervalType>(activeInterval);
   const isPollingBusy = useRef(false);
 
+  // 同步 ref 以便在异步闭包中使用最新数据
   useEffect(() => {
-    blocksRef.current = blocks;
-  }, [blocks]);
+    blocksRef.current = allBlocks;
+  }, [allBlocks]);
 
-  useEffect(() => {
-    intervalRef.current = activeInterval;
-  }, [activeInterval]);
+  // 根据当前采样间隔，从主数据集中过滤出显示的区块
+  const displayBlocks = useMemo(() => {
+    const filtered = allBlocks.filter(b => isAligned(b.height, activeInterval));
+    if (searchQuery) {
+      return filtered.filter(b => 
+        b.height.toString().includes(searchQuery) || 
+        b.hash.toLowerCase().includes(searchQuery.toLowerCase())
+      );
+    }
+    return filtered;
+  }, [allBlocks, activeInterval, searchQuery]);
 
   const saveApiKey = useCallback((key: string) => {
     const trimmed = key.trim();
@@ -38,9 +49,11 @@ const App: React.FC = () => {
     setApiKey(trimmed);
     setShowSettings(false);
     setError(null);
+    setAllBlocks([]); // 更换 Key 时才清空
   }, []);
 
-  const fetchData = useCallback(async (interval: IntervalType) => {
+  // 仅获取最新区块作为起点，不拉取历史数据
+  const initRealtimeStream = useCallback(async () => {
     if (!apiKey) {
       setShowSettings(true);
       return;
@@ -53,56 +66,28 @@ const App: React.FC = () => {
       const latestRaw = await fetchLatestBlock(apiKey);
       const latest = transformTronBlock(latestRaw);
       
-      let currentHeight = latest.height;
-      if (interval > 1) {
-        currentHeight = Math.floor(currentHeight / interval) * interval;
-      }
-      
-      const count = 60;
-      const targetHeights: number[] = [];
-      for (let i = 0; i < count; i++) {
-        targetHeights.push(currentHeight - (i * interval));
-      }
-      
-      const results: BlockData[] = [];
-      // Use a smaller batch size to avoid hitting concurrent connection limits
-      const batchSize = 3; 
-      
-      for (let i = 0; i < targetHeights.length; i += batchSize) {
-        const batch = targetHeights.slice(i, i + batchSize);
-        const batchResults = await Promise.all(
-          batch.map(async (num) => {
-            try {
-              // fetchBlockByNum has its own internal memory cache now
-              return await fetchBlockByNum(num, apiKey);
-            } catch (e) {
-              return null;
-            }
-          })
-        );
-        results.push(...batchResults.filter((b): b is BlockData => b !== null));
-        
-        // Minor delay between batches to respect TronGrid's likely per-second limit
-        if (i + batchSize < targetHeights.length) {
-          await new Promise(r => setTimeout(r, 100));
-        }
-      }
-
-      setBlocks(results.sort((a, b) => b.height - a.height));
+      // 如果当前列表为空，则把最新区块加入。如果已有数据，则不重复操作。
+      setAllBlocks(prev => {
+        if (prev.some(b => b.height === latest.height)) return prev;
+        return [latest, ...prev].slice(0, 1000); // 限制总量防止内存溢出
+      });
     } catch (err: any) {
-      console.error("fetchData error:", err);
-      setError(err.message || "网络请求失败。请确认 API Key 是否正确并具有访问权限。");
+      console.error("初始化失败:", err);
+      setError(err.message || "网络异常：请检查 API Key 权限或网络连接。");
     } finally {
       setIsLoading(false);
     }
   }, [apiKey]);
 
   useEffect(() => {
-    if (apiKey) fetchData(activeInterval);
-  }, [activeInterval, apiKey, fetchData]);
+    if (apiKey && allBlocks.length === 0) {
+      initRealtimeStream();
+    }
+  }, [apiKey, initRealtimeStream, allBlocks.length]);
 
+  // 3 秒高频轮询
   useEffect(() => {
-    if (!apiKey || searchQuery || isLoading) return;
+    if (!apiKey || isLoading) return;
 
     const poll = async () => {
       if (isPollingBusy.current || document.hidden) return;
@@ -114,66 +99,54 @@ const App: React.FC = () => {
         const currentTopHeight = blocksRef.current[0]?.height || 0;
 
         if (latest.height > currentTopHeight) {
-          const interval = intervalRef.current;
-          const missedHeights: number[] = [];
+          setIsSyncing(true);
+          const newBlocks: BlockData[] = [];
           
+          // 获取从上次最高高度到当前最新高度的所有区块（补齐中间缺失的）
+          // 注意：此处始终以间隔 1 为准获取所有块，展示时再过滤。
           for (let h = currentTopHeight + 1; h <= latest.height; h++) {
-            if (isAligned(h, interval)) missedHeights.push(h);
+            try {
+              const b = await fetchBlockByNum(h, apiKey);
+              newBlocks.push(b);
+            } catch (e) {
+              // 容忍单次失败
+            }
           }
-
-          if (missedHeights.length > 0) {
-            setIsSyncing(true);
-            const newBlocks: BlockData[] = [];
-            
-            // Sequential fetching for poll to be very gentle
-            for (const num of missedHeights) {
-              try {
-                const b = await fetchBlockByNum(num, apiKey);
-                newBlocks.push(b);
-                await new Promise(r => setTimeout(r, 50)); 
-              } catch (e) {
-                // ignore single block errors during polling
+          
+          if (newBlocks.length > 0) {
+            setAllBlocks(prev => {
+              const combined = [...newBlocks, ...prev];
+              const uniqueMap = new Map();
+              for (const b of combined) {
+                if (!uniqueMap.has(b.height)) uniqueMap.set(b.height, b);
               }
-            }
-            
-            if (newBlocks.length > 0) {
-              setBlocks(prev => {
-                const combined = [...newBlocks, ...prev];
-                const uniqueMap = new Map();
-                for (const b of combined) {
-                  if (!uniqueMap.has(b.height)) uniqueMap.set(b.height, b);
-                }
-                return Array.from(uniqueMap.values())
-                  .sort((a, b) => b.height - a.height)
-                  .slice(0, 150);
-              });
-            }
-            setIsSyncing(false);
+              return Array.from(uniqueMap.values())
+                .sort((a, b) => b.height - a.height)
+                .slice(0, 1000); 
+            });
           }
+          setIsSyncing(false);
         }
         if (error) setError(null);
       } catch (e) {
-        // Silent catch for polling
+        // 静默处理轮询异常
       } finally {
         isPollingBusy.current = false;
       }
     };
 
-    const pollingId = window.setInterval(poll, 5000); // Relaxed polling to 5s
+    const pollingId = window.setInterval(poll, 3000);
     return () => clearInterval(pollingId);
-  }, [apiKey, searchQuery, isLoading, error]);
+  }, [apiKey, isLoading, error]);
 
   const handleSearch = useCallback((e: React.FormEvent) => {
     e.preventDefault();
-    if (!searchQuery) {
-      fetchData(activeInterval);
-      return;
-    }
-    setBlocks(prev => prev.filter(b => 
-      b.height.toString().includes(searchQuery) || 
-      b.hash.toLowerCase().includes(searchQuery.toLowerCase())
-    ));
-  }, [searchQuery, activeInterval, fetchData]);
+    // 搜索逻辑已集成在 displayBlocks 的 useMemo 中
+  }, []);
+
+  const handleReset = useCallback(() => {
+    setSearchQuery('');
+  }, []);
 
   const intervals = useMemo(() => [
     { label: '单区块', value: 1 as IntervalType },
@@ -188,11 +161,12 @@ const App: React.FC = () => {
         <div className="w-full flex justify-between items-center mb-6">
           <div className="w-10"></div>
           <h1 className="text-3xl md:text-4xl font-black text-blue-600 tracking-tight text-center">
-            哈希走势大盘 <span className="text-gray-300 font-light mx-2">|</span> <span className="text-gray-400">Analysis</span>
+            哈希走势大盘 <span className="text-gray-300 font-light mx-2">|</span> <span className="text-gray-400">实时流</span>
           </h1>
           <button 
             onClick={() => setShowSettings(true)}
             className="p-3 bg-white shadow-sm border border-gray-100 hover:bg-gray-50 rounded-2xl transition-all text-gray-500 active:scale-95"
+            aria-label="设置"
           >
             <Settings className="w-6 h-6" />
           </button>
@@ -206,7 +180,7 @@ const App: React.FC = () => {
             }`}
           >
             <BarChart3 className="w-4 h-4" />
-            <span>单双走势</span>
+            <span>单双分析</span>
           </button>
           <button
             onClick={() => setActiveView('size')}
@@ -215,13 +189,13 @@ const App: React.FC = () => {
             }`}
           >
             <PieChart className="w-4 h-4" />
-            <span>大小走势</span>
+            <span>大小分析</span>
           </button>
         </div>
 
         <p className="bg-white px-5 py-2 rounded-full shadow-sm border border-gray-50 text-gray-400 text-[10px] uppercase tracking-[0.25em] font-black flex items-center">
           <ShieldCheck className="w-3.5 h-3.5 mr-2 text-green-500" />
-          Mainnet Protocol Verified
+          波场主网实时协议已验证
         </p>
       </header>
 
@@ -235,17 +209,17 @@ const App: React.FC = () => {
               <div className="w-20 h-20 bg-blue-50 rounded-[2rem] flex items-center justify-center mx-auto mb-6">
                 <Settings className="w-10 h-10 text-blue-600" />
               </div>
-              <h2 className="text-2xl font-black text-gray-900">API 安全连接</h2>
-              <p className="text-gray-500 text-sm mt-3 leading-relaxed">接入 TronGrid 获取实时链上哈希</p>
+              <h2 className="text-2xl font-black text-gray-900">API 连接配置</h2>
+              <p className="text-gray-500 text-sm mt-3 leading-relaxed">请输入有效的 TronGrid API Key 以开启实时数据流</p>
             </div>
             <div className="space-y-6">
               <div>
-                <label className="block text-[10px] font-black text-gray-400 uppercase mb-2 tracking-[0.2em] ml-2">API KEY</label>
+                <label className="block text-[10px] font-black text-gray-400 uppercase mb-2 tracking-[0.2em] ml-2">TRONGRID API KEY</label>
                 <input
                   type="text"
                   defaultValue={apiKey}
                   id="api-key-input"
-                  placeholder="Paste TronGrid Key..."
+                  placeholder="在此输入您的 API Key..."
                   className="w-full px-6 py-5 rounded-[1.5rem] bg-gray-50 border-2 border-transparent focus:border-blue-500 focus:bg-white outline-none transition-all font-mono text-sm shadow-inner"
                 />
               </div>
@@ -256,7 +230,7 @@ const App: React.FC = () => {
                 }}
                 className="w-full bg-blue-600 hover:bg-blue-700 text-white font-black py-5 rounded-[1.5rem] transition-all shadow-xl shadow-blue-100 active:scale-95"
               >
-                立即同步
+                保存并开始监听
               </button>
             </div>
           </div>
@@ -267,10 +241,10 @@ const App: React.FC = () => {
         <div className="mb-10 bg-red-50 border-l-8 border-red-500 p-6 rounded-[1.5rem] flex items-start text-red-700 shadow-md">
           <AlertCircle className="w-6 h-6 mr-4 shrink-0 mt-0.5" />
           <div className="flex-1">
-            <h4 className="font-black text-sm mb-1 uppercase tracking-wider">Network Conflict</h4>
+            <h4 className="font-black text-sm mb-1 uppercase tracking-wider">连接异常</h4>
             <p className="text-xs font-medium opacity-80">{error}</p>
           </div>
-          <button onClick={() => fetchData(activeInterval)} className="ml-4 px-5 py-2.5 bg-red-100 rounded-xl text-xs font-black uppercase hover:bg-red-200 transition-colors">Retry</button>
+          <button onClick={() => initRealtimeStream()} className="ml-4 px-5 py-2.5 bg-red-100 rounded-xl text-xs font-black uppercase hover:bg-red-200 transition-colors">立即重试</button>
         </div>
       )}
 
@@ -279,12 +253,11 @@ const App: React.FC = () => {
           <button
             key={item.value}
             onClick={() => setActiveInterval(item.value)}
-            disabled={isLoading}
             className={`px-10 py-3 rounded-[1.25rem] text-xs md:text-sm font-black transition-all duration-300 border-2 ${
               activeInterval === item.value
                 ? 'bg-blue-600 text-white border-blue-600 shadow-2xl scale-110'
                 : 'bg-white text-gray-400 border-transparent hover:border-blue-100 hover:text-blue-500'
-            } ${isLoading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            }`}
           >
             {item.label}
           </button>
@@ -297,11 +270,11 @@ const App: React.FC = () => {
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/40 backdrop-blur-[2px] rounded-[2rem] transition-all">
               <div className="bg-white p-8 rounded-[2.5rem] shadow-2xl flex flex-col items-center border border-gray-100">
                 <Loader2 className="w-12 h-12 text-blue-600 animate-spin mb-4" />
-                <span className="text-[10px] font-black text-gray-500 uppercase tracking-[0.3em]">{isLoading ? 'Initializing' : 'Syncing Data'}</span>
+                <span className="text-[10px] font-black text-gray-500 uppercase tracking-[0.3em]">{isLoading ? '初始化中' : '同步中'}</span>
               </div>
             </div>
           )}
-          <TrendChart blocks={blocks} mode={activeView} />
+          <TrendChart blocks={displayBlocks} mode={activeView} />
         </div>
       </div>
 
@@ -311,13 +284,13 @@ const App: React.FC = () => {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="搜索区块号或 Hash..."
+            placeholder="搜索当前已捕获的区块高度或 Hash..."
             className="w-full pl-7 pr-16 py-5 rounded-[1.5rem] bg-gray-50 border-0 focus:outline-none focus:ring-4 focus:ring-blue-50 transition-all text-sm font-medium"
           />
           <Search className="absolute right-7 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-300 group-focus-within:text-blue-400 transition-colors" />
         </form>
         <div className="flex space-x-4 w-full md:w-auto">
-          <button onClick={() => {setSearchQuery(''); fetchData(activeInterval);}} className="flex-1 md:flex-none flex items-center justify-center px-8 py-5 bg-gray-100 text-gray-400 rounded-[1.5rem] hover:bg-gray-200 transition-all active:scale-95">
+          <button onClick={handleReset} className="flex-1 md:flex-none flex items-center justify-center px-8 py-5 bg-gray-100 text-gray-400 rounded-[1.5rem] hover:bg-gray-200 transition-all active:scale-95" title="清除搜索">
             <RotateCcw className="w-5 h-5" />
           </button>
           <button onClick={handleSearch} className="flex-1 md:flex-none flex items-center justify-center px-14 py-5 bg-blue-600 text-white rounded-[1.5rem] text-sm font-black hover:bg-blue-700 transition-all shadow-xl shadow-blue-100 active:scale-95">
@@ -326,7 +299,7 @@ const App: React.FC = () => {
         </div>
       </div>
 
-      <DataTable blocks={blocks} />
+      <DataTable blocks={displayBlocks} />
 
       <div className="fixed bottom-10 right-10 z-50 pointer-events-none">
         <div className="bg-white/95 backdrop-blur-md shadow-2xl rounded-[1.5rem] px-8 py-5 border border-gray-100 flex items-center space-x-5">
@@ -335,9 +308,9 @@ const App: React.FC = () => {
             <span className={`relative inline-flex rounded-full h-3.5 w-3.5 ${apiKey && !error ? 'bg-green-500' : 'bg-red-500'}`}></span>
           </div>
           <div className="flex flex-col">
-            <span className="text-[9px] text-gray-400 font-black uppercase tracking-widest leading-none mb-1.5">Network Status</span>
+            <span className="text-[9px] text-gray-400 font-black uppercase tracking-widest leading-none mb-1.5">连接状态</span>
             <span className="text-[11px] font-black text-gray-800 flex items-center">
-              {apiKey && !error ? (isSyncing ? 'UPDATING' : 'STABLE') : 'ERROR'}
+              {apiKey && !error ? (isSyncing ? '数据同步中' : '监听已开启') : '未就绪'}
               {isSyncing && <RefreshCw className="w-3 h-3 ml-3 animate-spin text-blue-500" />}
             </span>
           </div>
