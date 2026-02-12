@@ -7,8 +7,20 @@ interface DataTableProps {
 }
 
 const DataRow = memo(({ block, isEven }: { block: BlockData; isEven: boolean }) => {
-  // Pre-split timestamp to avoid doing it every render
-  const timeParts = block.timestamp.split(' ');
+  // 将 Unix 时间戳转换为可读格式
+  const formatTimestamp = (timestamp: number | string) => {
+    // 如果是字符串，直接分割
+    if (typeof timestamp === 'string') {
+      return timestamp.split(' ');
+    }
+    // 如果是数字（Unix 时间戳），转换为日期
+    const date = new Date(timestamp * 1000); // Unix 时间戳是秒，需要转换为毫秒
+    const dateStr = date.toLocaleDateString('zh-CN');
+    const timeStr = date.toLocaleTimeString('zh-CN', { hour12: false });
+    return [dateStr, timeStr];
+  };
+  
+  const timeParts = formatTimestamp(block.timestamp);
 
   const handleRowClick = () => {
     window.open(`https://tronscan.io/#/block/${block.height}`, '_blank');

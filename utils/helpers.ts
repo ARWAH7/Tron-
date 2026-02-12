@@ -97,22 +97,19 @@ export const transformTronBlock = (raw: any): BlockData => {
   };
 };
 
-export const isAligned = (height: number, interval: number): boolean => {
-  if (interval === 1) return true;
-  return height % interval === 0;
-};
-
 /**
  * Big Road Calculation:
- * New column when result changes.
+ * Optimized for stability: when data reaches limits, it shifts by full logical columns.
+ * 限制最多 40 列，超过后删除最后一列（最旧的数据）
  */
 export const calculateTrendGrid = (
   blocks: BlockData[], 
   typeKey: 'type' | 'sizeType',
   rows: number = 6
 ): GridCell[][] => {
-  if (blocks.length === 0) return Array(24).fill(Array(rows).fill({ type: null }));
+  if (blocks.length === 0) return Array(40).fill(null).map(() => Array(rows).fill({ type: null }));
   
+  // Sort chronologically for path finding
   const chronological = [...blocks].sort((a, b) => a.height - b.height);
   const columns: GridCell[][] = [];
   let currentColumn: GridCell[] = [];
@@ -120,6 +117,7 @@ export const calculateTrendGrid = (
 
   chronological.forEach((block) => {
     const currentVal = block[typeKey];
+    // Rule for "Big Road": New column on result change OR if current column is full
     if (currentVal !== lastVal || currentColumn.length >= rows) {
       if (currentColumn.length > 0) {
         while (currentColumn.length < rows) {
@@ -140,8 +138,15 @@ export const calculateTrendGrid = (
     columns.push(currentColumn);
   }
 
-  const minCols = 24;
-  while (columns.length < minCols) {
+  // 限制最多 44 列，超过后删除最后一列（最旧的数据）
+  const maxCols = 44;
+  if (columns.length > maxCols) {
+    // 删除最后的列（最旧的数据），保留最新的 44 列
+    return columns.slice(columns.length - maxCols);
+  }
+
+  // 如果不足 44 列，填充空列
+  while (columns.length < maxCols) {
     columns.push(Array(rows).fill({ type: null }));
   }
 
@@ -150,32 +155,66 @@ export const calculateTrendGrid = (
 
 /**
  * Bead Road Calculation:
- * Sequential filling: top-to-bottom, column-by-column.
+ * Fixed Column Alignment Logic. 
+ * Instead of shifting by 1 block, it ensures the first block of the first column 
+ * is always consistent with a modulo of the height, preventing jitter.
+ * 限制最多 40 列，超过后删除最后一列（最旧的数据）
  */
 export const calculateBeadGrid = (
   blocks: BlockData[],
   typeKey: 'type' | 'sizeType',
-  rows: number = 6
+  rows: number = 6,
+  interval: number = 1,
+  startBlock: number = 0
 ): GridCell[][] => {
-  const minCols = 24;
+  if (blocks.length === 0) return Array(44).fill(null).map(() => Array(rows).fill({ type: null }));
+
   const chronological = [...blocks].sort((a, b) => a.height - b.height);
-  const totalItems = chronological.length;
-  const numCols = Math.max(minCols, Math.ceil(totalItems / rows));
+  const minHeight = chronological[0].height;
   
-  const columns: GridCell[][] = [];
-  for (let c = 0; c < numCols; c++) {
-    const column: GridCell[] = [];
-    for (let r = 0; r < rows; r++) {
-      const index = c * rows + r;
-      if (index < totalItems) {
-        const block = chronological[index];
-        column.push({ type: block[typeKey] as any, value: block.resultValue });
-      } else {
-        column.push({ type: null });
-      }
+  // Calculate a stable anchor height for the very first cell (0,0)
+  // This ensures that a block with height H always lands in the same (r, c) relative to the epoch
+  const epoch = startBlock || 0;
+  
+  // Find the logical index of each block in the global sequence
+  // Index = (Height - Epoch) / Interval
+  const indexedBlocks = chronological.map(b => ({
+    block: b,
+    idx: Math.floor((b.height - epoch) / interval)
+  }));
+
+  // Determine the window of columns to display
+  // We want to align the first column to a multiple of 'rows'
+  const firstGlobalIdx = indexedBlocks[0].idx;
+  const startColIdx = Math.floor(firstGlobalIdx / rows);
+  const lastGlobalIdx = indexedBlocks[indexedBlocks.length - 1].idx;
+  const endColIdx = Math.max(startColIdx + 43, Math.floor(lastGlobalIdx / rows));
+  
+  const totalCols = endColIdx - startColIdx + 1;
+  
+  // 限制最多 44 列
+  const maxCols = 44;
+  const actualCols = Math.min(totalCols, maxCols);
+  
+  // 如果超过 44 列，调整起始列索引，只显示最新的 44 列
+  const adjustedStartColIdx = totalCols > maxCols ? endColIdx - maxCols + 1 : startColIdx;
+  
+  const grid: GridCell[][] = Array.from({ length: actualCols }, () => 
+    Array.from({ length: rows }, () => ({ type: null }))
+  );
+
+  indexedBlocks.forEach(({ block, idx }) => {
+    const globalCol = Math.floor(idx / rows);
+    const localCol = globalCol - adjustedStartColIdx;
+    const localRow = idx % rows;
+    
+    if (localCol >= 0 && localCol < actualCols) {
+      grid[localCol][localRow] = { 
+        type: block[typeKey] as any, 
+        value: block.resultValue 
+      };
     }
-    columns.push(column);
-  }
-  
-  return columns;
+  });
+
+  return grid;
 };
